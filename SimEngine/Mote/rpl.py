@@ -296,7 +296,7 @@ class Rpl(object):
         return newDIO
 
     def action_receiveDIO(self, packet):
-
+        # MoteDefines as d
         assert packet['type'] == d.PKT_TYPE_DIO
 
         # abort if I'm not sync'ed (I cannot decrypt the DIO)
@@ -1087,3 +1087,199 @@ class RplOFBestLinkPDR(RplOF0):
 
         # then return the first neighbor in "parents"
         return self.parents[0]
+
+# code of taof, edit from here
+class RplTaOF(object):
+
+    # Constants defined in RFC 6550
+    INFINITE_RANK = 65535
+
+    # Other constants
+    UPPER_LIMIT_OF_ACCEPTABLE_ETX = 3
+    PARENT_SWITCH_THRESHOLD = 160
+
+    def __init__(self, rpl):
+        self.rpl = rpl
+        self.neighbors = []
+        self.rank = self.INFINITE_RANK
+        self.preferred_parent = None
+        self.etx_table = {}
+
+    @property
+    def parents(self):
+        return (
+            [n for n in self.neighbors if self.get_etx(n['mac_addr']) <= self.UPPER_LIMIT_OF_ACCEPTABLE_ETX]
+        )
+
+    def update(self, dio):
+        # got DIO update
+        
+        # print(Fore.RED+"UPDATE!")
+        # print(Style.RESET_ALL)
+        mac_addr = dio['mac']['srcMac']
+        ptr = dio['app']['ptr']
+
+        # print("Got new PTR {}".format(ptr))
+
+        neighbor = self._find_neighbor(mac_addr)
+        if neighbor is None:
+            neighbor = self._add_neighbor(mac_addr)
+        
+        self._update_neighbor_etx(neighbor, self.get_etx(mac_addr))
+        self._update_neighbor_ptr(neighbor, ptr)
+
+        # change preferred parent if necessary
+        self._update_preferred_parent()
+
+    def get_rank(self):
+        return self.INFINITE_RANK
+
+    def get_preferred_parent(self):
+        if self.preferred_parent is None:
+            return None
+        else:
+            return self.preferred_parent['mac_addr']
+
+    def get_etx(self, mac_addr):
+        if mac_addr not in self.etx_table:
+            return 1
+        if self.etx_table[mac_addr]['numTx'] == 0:
+            return 1
+        if self.etx_table[mac_addr]['numTxAck'] == 0:
+            return 3
+        return float(self.etx_table[mac_addr]['numTx'])/self.etx_table[mac_addr]['numTxAck']
+
+    def update_etx(self, cell, mac_addr, isACKed):
+        if mac_addr not in self.etx_table:
+            pdr_data = {"numTx": 0, "numTxAck": 0}
+            self.etx_table[mac_addr] = pdr_data
+        else:
+            pdr_data = self.etx_table[mac_addr]
+
+        pdr_data['numTx'] += 1
+
+        if isACKed:
+            pdr_data['numTxAck'] += 1
+
+        neighbor = self._find_neighbor(mac_addr)
+
+        # print(Fore.BLUE+"Indicated TX from node {}, to MAC {} with ACK: {}".format(self.rpl.mote.id,mac_addr,isACKed))
+        # print("and neighbor found" if neighbor is not None else "and neighbor  :(")
+        # print(Fore.MAGENTA+"ETX: {}".format(self.get_etx(mac_addr)))
+        # print(Style.RESET_ALL)
+
+        if neighbor is None:
+            # neighbor haven't sent DIO yet.
+            return
+
+        self._update_neighbor_etx(neighbor, self.get_etx(mac_addr))
+        self._update_preferred_parent()
+        
+
+    def _add_neighbor(self, mac_addr):
+        assert self._find_neighbor(mac_addr) is None
+
+        neighbor = {
+            'mac_addr': mac_addr,
+            'advertised_ptr': None,
+            'etx': None
+        }
+        self.neighbors.append(neighbor)
+        return neighbor
+
+    def _find_neighbor(self, mac_addr):
+        for neighbor in self.neighbors:
+            if neighbor['mac_addr'] == mac_addr:
+                return neighbor
+        return None
+
+    def _update_neighbor_etx(self, neighbor, new_etx):
+        neighbor['etx'] = new_etx
+
+    def _update_neighbor_ptr(self, neighbor, new_advertised_ptr):
+        neighbor['advertised_ptr'] = new_advertised_ptr
+
+    # new metric must be inside 
+    def _update_preferred_parent(self):
+        # calculate total traffic (pkt/sec) to be sent
+        totalTraffic = 1.0/self.settings.traffic*self.settings.timeslots*self.settings.slotDuration # converts from (sec/pkt) to (pkt/cycle)
+        for (n,_) in self.PDR.items():
+            if self.averageIncomingTraffics.has_key(n):
+                totalTraffic += self.averageIncomingTraffics[n]/self.HOUSEKEEPING_PERIOD*self.settings.timeslots*self.settings.slotDuration
+        
+        for (n,period) in self.dataPeriod.items():
+                        # calculate outgoing traffic
+                        portion = self.settings.traffic/period
+                        reqNumCell = math.ceil(self.estimateETX(n)*portion*totalTraffic) # required bandwidth
+                        #reqNumCell = math.ceil(portion*totalTraffic) # required bandwidth
+                        
+                        # Compare outgoing traffic with total traffic to be sent 
+                        while True:                
+                            numCell = self.numCells.get(n)
+
+                            if reqNumCell > numCell:
+                                # schedule another cell if needed
+                                self._addCellToNeighbor(n)
+                                if numCell == self.numCells.get(n): # cannot find free time slot
+                                    break
+                            elif reqNumCell < numCell:
+                                self._removeWorstCellToNeighbor(n)
+                                if numCell == self.numCells.get(n): # cannot find worst cell due to insufficient tx
+                                    break
+                                
+                            else: # reqNumCell = numCell
+                                break
+                        
+                        #find worst cell in a bundle and if it is way worst and reschedule it
+                        self.rescheduleCellIfNeeded(n)
+                        # Neighbor also has to update its next active cell 
+                        n._schedule_next_ActiveCell()
+                                
+            
+        try:
+            # print(Fore.YELLOW + "From mote {} neighbors ".format(self.rpl.mote.id))
+            # pp.pprint(self.neighbors)
+            # print(Fore.CYAN + "are suitable parents")
+            # pp.pprint(self.parents)
+            candidate = min(self.parents, key=lambda p:p["advertised_ptr"])
+            # print(Fore.MAGENTA + "Selected as candidate {}".format(str(candidate)))
+            # print(Style.RESET_ALL)
+            # if(len(self.neighbors) > 3):
+            #     print("STOP")
+        except ValueError:
+            # self.parents is empty
+            candidate = None
+
+        old_preferred_parent = self.preferred_parent
+
+        if (old_preferred_parent is None) and (candidate is None):
+            new_preferred_parent = None
+        else:
+            new_preferred_parent = candidate
+
+
+        if (
+                (new_preferred_parent is not None)
+                and
+                (new_preferred_parent != old_preferred_parent)
+            ):
+
+                if old_preferred_parent is not None:
+                    if abs(old_preferred_parent["advertised_ptr"] - new_preferred_parent["advertised_ptr"]) >= self.PARENT_SWITCH_THRESHOLD:
+                        self.preferred_parent = new_preferred_parent
+                        self.rpl.indicate_preferred_parent_change(
+                            old_preferred = old_preferred_parent['mac_addr'] if old_preferred_parent else None ,
+                            new_preferred = new_preferred_parent['mac_addr']
+                        )
+                        # print("Changing parent")
+                    # else:  
+                        # print("Not changing parent due to threshold")
+                else:
+                    self.preferred_parent = new_preferred_parent
+                    self.rpl.indicate_preferred_parent_change(
+                        old_preferred = old_preferred_parent['mac_addr'] if old_preferred_parent else None ,
+                        new_preferred = new_preferred_parent['mac_addr']
+                    )
+                    print("Chosing first parent")
+        # else:
+        #         print("Wont change parent")

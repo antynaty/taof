@@ -1,15 +1,15 @@
 {
     "version":                                             0,
     "execution": {
-        "numCPUs":                                         1,
+        "numCPUs":                                         -1,
         "numRuns":                                         1
     },
     "settings": {
         "combination": {
-            "exec_numMotes":                               [4]
+            "exec_numMotes":                               [10,20,30]
         },
         "regular": {
-            "exec_numSlotframesPerRun":                    1000,
+            "exec_numSlotframesPerRun":                    10,
             "exec_minutesPerRun":                          null,
             "exec_randomSeed":                             "random",
 
@@ -22,7 +22,7 @@
             "app_burstTimestamp":                          null,
             "app_burstNumPackets":                         0,
 
-            "rpl_of":                                      "OF0",
+            "rpl_of":                                      "RplTaOF",
             "rpl_daoPeriod":                               60,
             "rpl_extensions":                              ["dis_unicast"],
 
